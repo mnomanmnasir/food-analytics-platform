@@ -49,6 +49,8 @@ model MenuItem {
   price        Float
   category     String
   imageUrl     String?
+  popularityScore Float   @default(0)
+  isAvailable  Boolean    @default(true)
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
   restaurantId Int
   orderItems   OrderItem[]
@@ -70,9 +72,9 @@ model Order {
   paymentMethod String
   paymentStatus PaymentStatus @default(PENDING)
   notes        String?
+  delivery     Delivery?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
-  
 }
 
 model OrderItem {
@@ -99,6 +101,21 @@ model Review {
   updatedAt    DateTime @updatedAt
 }
 
+model Delivery {
+  id                    Int            @id @default(autoincrement())
+  order                 Order          @relation(fields: [orderId], references: [id])
+  orderId               Int            @unique
+  driverName            String?
+  driverPhone           String?
+  status                DeliveryStatus @default(ASSIGNED)
+  estimatedDeliveryTime DateTime?
+  actualDeliveryTime    DateTime?
+  pickupTime            DateTime?
+  currentLocation       String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+}
+
 enum UserRole {
   ADMIN
   RESTAURANT_OWNER
@@ -121,4 +138,13 @@ enum PaymentStatus {
   COMPLETED
   FAILED
   REFUNDED
+}
+
+enum DeliveryStatus {
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  NEARBY
+  DELIVERED
+  FAILED
 }

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { EventsGateway } from '../events/events.gateway';
 
 type TimeWindow = 'day' | 'week' | 'month';
 
@@ -7,7 +8,10 @@ type TimeWindow = 'day' | 'week' | 'month';
 export class AnalyticsService {
   private readonly logger = new Logger(AnalyticsService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private eventsGateway: EventsGateway,
+  ) {}
 
   async getTopPopularDishes(restaurantId: number) {
     try {
@@ -20,6 +24,7 @@ export class AnalyticsService {
         category: string;
         imageUrl: string | null;
         restaurantId: number;
+        popularityScore: number;
         orderItems: Array<{ quantity: number }>;
         createdAt: Date;
         updatedAt: Date;
@@ -29,7 +34,7 @@ export class AnalyticsService {
       const menuItems = await this.prisma.menuItem.findMany({
         where: { 
           restaurantId,
-          // isActive: true 
+          isAvailable: true 
         },
         include: {
           orderItems: {
@@ -51,7 +56,13 @@ export class AnalyticsService {
       // Process to get total quantity ordered for each menu item
       const popularDishes = menuItems
         .map(menuItem => ({
-          ...menuItem,
+          id: menuItem.id,
+          name: menuItem.name,
+          description: menuItem.description,
+          price: menuItem.price,
+          category: menuItem.category,
+          imageUrl: menuItem.imageUrl,
+          popularityScore: menuItem.popularityScore,
           totalOrdered: menuItem.orderItems?.length 
             ? menuItem.orderItems.reduce((sum, item) => sum + (item.quantity || 0), 0) 
             : 0
@@ -104,7 +115,7 @@ export class AnalyticsService {
 
   async getPeakOrderingTimes(restaurantId: number) {
     try {
-      const result = await this.prisma.$queryRaw<{ hour: number; count: bigint }[]>`
+      const result = await this.prisma.$queryRaw<{ hour: bigint; count: bigint }[]>`
         SELECT 
           HOUR(createdAt) as hour,
           COUNT(*) as count
@@ -117,9 +128,9 @@ export class AnalyticsService {
       `;
 
       return result.map(item => ({
-        hour: item.hour,
+        hour: Number(item.hour),
         orderCount: Number(item.count),
-        timeRange: `${item.hour}:00 - ${item.hour + 1}:00`
+        timeRange: `${Number(item.hour)}:00 - ${Number(item.hour) + 1}:00`
       }));
     } catch (error) {
       this.logger.error(`Error in getPeakOrderingTimes: ${error.message}`, error.stack);
@@ -151,10 +162,9 @@ export class AnalyticsService {
             select: {
               id: true,
               name: true,
-            //   contactNumber: true 
             }
-          },
-        //   delivery: true
+          }
+          // Note: `delivery` is intentionally not included to avoid runtime errors when the Delivery table isn't migrated yet.
         },
         orderBy: {
           createdAt: 'asc'
@@ -163,6 +173,78 @@ export class AnalyticsService {
     } catch (error) {
       this.logger.error(`Error in getStaleOrders: ${error.message}`, error.stack);
       throw new Error('Failed to fetch stale orders');
+    }
+  }
+
+  // NEW: Update dish popularity scores based on recent sales
+  async updateDishPopularityScores(restaurantId: number) {
+    try {
+      const dishes = await this.getTopPopularDishes(restaurantId);
+      
+      // Update popularity scores in database
+      for (const dish of dishes) {
+        await this.prisma.menuItem.update({
+          where: { id: dish.id },
+          data: { 
+            popularityScore: dish.totalOrdered 
+          }
+        });
+      }
+
+      this.logger.log(`Updated popularity scores for restaurant ${restaurantId}`);
+      return dishes;
+    } catch (error) {
+      this.logger.error(`Error updating popularity scores: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  // NEW: Broadcast complete analytics dashboard to restaurant
+  async broadcastRestaurantAnalytics(restaurantId: number) {
+    try {
+      const [popularDishes, deliveryTime, peakTimes, staleOrders] = await Promise.all([
+        this.getTopPopularDishes(restaurantId),
+        this.getAverageDeliveryTime(restaurantId, 'week'),
+        this.getPeakOrderingTimes(restaurantId),
+        this.getStaleOrders(30)
+      ]);
+
+      const analyticsData = {
+        restaurantId,
+        timestamp: new Date().toISOString(),
+        popularDishes,
+        deliveryTime,
+        peakTimes,
+        staleOrders: staleOrders.filter(order => order.restaurantId === restaurantId),
+        summary: {
+          totalPopularDishes: popularDishes.length,
+          avgDeliveryMinutes: Math.round(deliveryTime.averageDeliveryTime),
+          peakHour: peakTimes[0]?.timeRange || 'N/A',
+          staleOrdersCount: staleOrders.filter(o => o.restaurantId === restaurantId).length
+        }
+      };
+
+      // Emit to restaurant room
+      this.eventsGateway.emitAnalyticsUpdate(restaurantId, analyticsData);
+      
+      this.logger.log(`Broadcasted analytics to restaurant ${restaurantId}`);
+      return analyticsData;
+    } catch (error) {
+      this.logger.error(`Error broadcasting analytics: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  // NEW: Trigger analytics update after order events
+  async triggerAnalyticsUpdateOnOrderChange(restaurantId: number) {
+    try {
+      // Update popularity scores first
+      await this.updateDishPopularityScores(restaurantId);
+      
+      // Then broadcast full analytics
+      await this.broadcastRestaurantAnalytics(restaurantId);
+    } catch (error) {
+      this.logger.error(`Error triggering analytics update: ${error.message}`, error.stack);
     }
   }
 }

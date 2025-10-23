@@ -4,12 +4,14 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { OrderStatus, PaymentStatus } from '@prisma/client';
+import { EventsGateway } from '../events/events.gateway';
 
 @Injectable()
 export class OrdersService {
   constructor(
     private prisma: PrismaService,
-    private analyticsService: AnalyticsService
+    private analyticsService: AnalyticsService,
+    private eventsGateway: EventsGateway,
   ) { }
 
   async create(createOrderDto: CreateOrderDto, userId: number) {
@@ -72,6 +74,9 @@ export class OrdersService {
       },
     });
 
+    // Emit real-time update to restaurant
+    this.eventsGateway.emitOrderCreated(restaurantId, order);
+
     return order;
   }
 
@@ -92,6 +97,18 @@ export class OrdersService {
         user: true,
       },
     });
+
+    // Emit real-time update to restaurant
+    this.eventsGateway.emitOrderStatusUpdate(order.restaurantId, order);
+
+    // If order is delivered, trigger analytics update
+    // This will update dish popularity scores and broadcast updated analytics
+    if (status === 'DELIVERED') {
+      this.analyticsService.triggerAnalyticsUpdateOnOrderChange(order.restaurantId)
+        .catch(error => {
+          console.error('Failed to trigger analytics update:', error);
+        });
+    }
 
     return order;
   }
